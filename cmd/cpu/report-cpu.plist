@@ -7,6 +7,10 @@
         <key>ProgramArguments</key>
         <array>
             <string>/path/to/report-cpu</string>
+            <string>--addr=addr.of.metrics</string>
+            <string>--tls</string>
+            <string>--prefix=macos</string>
+            <string>--interval=10</string>
         </array>
         <key>RunAtLoad</key>
         <true />
