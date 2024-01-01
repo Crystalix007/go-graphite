@@ -11,6 +11,7 @@ import (
 
 	"github.com/Crystalix007/go-graphite/graphite"
 	cpustats "github.com/mackerelio/go-osstat/cpu"
+	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -20,7 +21,7 @@ func main() {
 		Use:   "cpu",
 		Short: "cpu",
 		Long:  "cpu",
-		RunE:  cpu,
+		RunE:  reportCPU,
 	}
 
 	cmd.Flags().String("addr", "", "Graphite server address")
@@ -34,7 +35,7 @@ func main() {
 	}
 }
 
-func cpu(cmd *cobra.Command, args []string) error {
+func reportCPU(cmd *cobra.Command, args []string) error {
 	addr, err := cmd.Flags().GetString("addr")
 	if err != nil {
 		return fmt.Errorf("cmd/cpu: failed to get address string: %w", err)
@@ -116,12 +117,13 @@ func cpu(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func reportCPUUsage(ctx context.Context,
+func reportCPUUsage(
+	ctx context.Context,
 	client graphite.Client,
 	metricMetadata graphite.MetricMetadata,
 	interval time.Duration,
 ) error {
-	var errg errgroup.Group
+	errg, ctx := errgroup.WithContext(ctx)
 
 	errg.Go(func() error {
 		return client.Submit(ctx)
@@ -163,6 +165,7 @@ func reportCPUUsage(ctx context.Context,
 				"total":  int(cpuStats.Total - previousStats.Total),
 				"user":   int(cpuStats.User - previousStats.User),
 			}
+			previousStats = cpuStats
 
 			for name, value := range incrementalCPUStats {
 				metric := metricMetadata.SubMetric(name, metricMetadata.Tags)
@@ -181,6 +184,131 @@ func reportCPUUsage(ctx context.Context,
 			}
 		}
 	})
+
+	errg.Go(func() error {
+		metricMetadata := graphite.MetricMetadata{
+			Name: []string{"gopsutil", "cpu"},
+			Tags: metricMetadata.Tags,
+		}
+
+		cpuStats, err := cpu.TimesWithContext(ctx, true)
+		if err != nil {
+			return fmt.Errorf(
+				"cmd/cpu: failed to get CPU times: %w",
+				err,
+			)
+		}
+
+		var previousStats []cpu.TimesStat = cpuStats
+
+		for {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf(
+					"cmd/cpu: context cancelled while reporting CPU usage: %w",
+					ctx.Err(),
+				)
+			case <-time.After(interval):
+			}
+
+			cpuStats, err = cpu.TimesWithContext(ctx, true)
+			if err != nil {
+				return fmt.Errorf(
+					"cmd/cpu: failed to get CPU info: %w",
+					err,
+				)
+			}
+
+			for i, cpuStat := range cpuStats {
+				previousStat := previousStats[i]
+
+				gopsutilCPUStats := map[string]int{
+					"nice":      int(cpuStat.Nice - previousStat.Nice),
+					"system":    int(cpuStat.System - previousStat.System),
+					"user":      int(cpuStat.User - previousStat.User),
+					"iowait":    int(cpuStat.Iowait - previousStat.Iowait),
+					"irq":       int(cpuStat.Irq - previousStat.Irq),
+					"softirq":   int(cpuStat.Softirq - previousStat.Softirq),
+					"steal":     int(cpuStat.Steal - previousStat.Steal),
+					"guest":     int(cpuStat.Guest - previousStat.Guest),
+					"guestnice": int(cpuStat.GuestNice - previousStat.GuestNice),
+				}
+
+				metric := metricMetadata.SubMetric(cpuStat.CPU, metricMetadata.Tags)
+
+				for metricName, metricValue := range gopsutilCPUStats {
+					metric := metric.SubMetric(metricName, metric.Tags)
+
+					if err := client.SendMetric(
+						ctx,
+						*metric,
+						fmt.Sprint(metricValue),
+						time.Now(),
+					); err != nil {
+						return fmt.Errorf(
+							"cmd/cpu: failed to queue CPU info metric: %w",
+							err,
+						)
+					}
+				}
+			}
+
+			previousStats = cpuStats
+		}
+	})
+
+	if IsRoot() {
+		errg.Go(func() error {
+			metricMetadata := metricMetadata.SubMetric("gpu", metricMetadata.Tags)
+
+			intervalWait := time.After(0)
+
+			for {
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf(
+						"cmd/cpu: context cancelled while reporting CPU counts: %w",
+						ctx.Err(),
+					)
+				case <-intervalWait:
+					intervalWait = time.After(interval)
+				}
+
+				gpuUtilisation, err := GetGPUUtilisation()
+				if err != nil {
+					return fmt.Errorf(
+						"cmd/cpu: failed to get GPU utilisation: %w",
+						err,
+					)
+				}
+
+				metrics := map[string]int{
+					"active_frequency": int(gpuUtilisation.ActiveFrequency),
+					"active_residency": int(gpuUtilisation.ActiveResidency),
+					"idle_residency":   int(gpuUtilisation.IdleResidency),
+					"power":            int(gpuUtilisation.Power),
+				}
+
+				for metricName, metricValue := range metrics {
+					metric := metricMetadata.SubMetric(metricName, metricMetadata.Tags)
+
+					if err := client.SendMetric(
+						ctx,
+						*metric,
+						fmt.Sprint(metricValue),
+						time.Now(),
+					); err != nil {
+						return fmt.Errorf(
+							"cmd/cpu: failed to queue GPU metric: %w",
+							err,
+						)
+					}
+				}
+			}
+		})
+	} else {
+		panic("cmd/cpu: GPU utilisation reporting requires root privileges")
+	}
 
 	return errg.Wait()
 }

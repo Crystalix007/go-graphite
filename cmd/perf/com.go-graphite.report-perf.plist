@@ -3,10 +3,10 @@
 <plist version="1.0">
     <dict>
         <key>Label</key>
-        <string>com.go-graphite.report-cpu</string>
+        <string>com.go-graphite.report-perf</string>
         <key>ProgramArguments</key>
         <array>
-            <string>/path/to/report-cpu</string>
+            <string>/path/to/report-perf</string>
             <string>--addr=addr.of.metrics</string>
             <string>--tls</string>
             <string>--prefix=macos</string>
