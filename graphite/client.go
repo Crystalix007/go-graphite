@@ -2,10 +2,12 @@ package graphite
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -63,7 +65,7 @@ type clientOptions struct {
 	Conn net.Conn
 
 	// The address of the Graphite server. This is used if [Conn] is not set.
-	Addr string
+	Addr url.URL
 }
 
 // ClientOption represents an option that can be set on the Graphite client.
@@ -103,7 +105,7 @@ func WithConnection(conn net.Conn) ClientOption {
 
 // WithAddress sets the address of the Graphite server. This is used if
 // [Conn] is not set.
-func WithAddress(addr string) ClientOption {
+func WithAddress(addr url.URL) ClientOption {
 	return func(c *clientOptions) {
 		c.Addr = addr
 	}
@@ -122,8 +124,35 @@ func (c *clientOptions) setDefaults(ctx context.Context) error {
 		c.MaxTries = DefaultMaxTries
 	}
 
-	if c.Conn == nil && c.Addr == "" {
-		return ErrNoAddress
+	if c.Conn == nil {
+		if c.Addr.Host == "" {
+			return ErrNoAddress
+		}
+
+		var err error
+
+		switch c.Addr.Scheme {
+		case "tls":
+			c.Conn, err = tls.Dial("tcp", c.Addr.Host, nil)
+			if err != nil {
+				return fmt.Errorf(
+					"graphite: failed to connect to TLS endpoint: %w",
+					err,
+				)
+			}
+		default:
+			// Assume TCP endpoint.
+			fallthrough
+		case "tcp":
+			c.Conn, err = net.Dial("tcp", c.Addr.Host)
+			if err != nil {
+				return fmt.Errorf(
+					"graphite: failed to connect to TCP endpoint: %w",
+					err,
+				)
+			}
+
+		}
 	}
 
 	return nil
